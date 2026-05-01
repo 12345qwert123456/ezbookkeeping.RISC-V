@@ -130,16 +130,20 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          printf '%s\n' \
+            "Unofficial automated build of [ezbookkeeping ${VERSION}](https://github.com/mayswind/ezbookkeeping/releases/tag/${VERSION}) for the **linux/riscv64** architecture." \
+            "" \
+            "No patches are applied to the upstream source." \
+            "" \
+            "**Docker:**" \
+            '```' \
+            "docker pull ${{ vars.DOCKERHUB_USERNAME }}/ezbookkeeping-riscv64:${VERSION_SHORT}" \
+            '```' \
+            > release-notes.md
+
           gh release create "${VERSION}-riscv64" \
             --repo "${{ github.repository }}" \
             --title "ezbookkeeping ${VERSION} for linux/riscv64" \
-            --notes "Unofficial automated build of [ezbookkeeping ${VERSION}](https://github.com/mayswind/ezbookkeeping/releases/tag/${VERSION}) for the **linux/riscv64** architecture.
-
-No patches are applied to the upstream source.
-
-**Docker:**
-\`\`\`
-docker pull ${{ vars.DOCKERHUB_USERNAME }}/ezbookkeeping-riscv64:${VERSION_SHORT}
-\`\`\`" \
+            --notes-file release-notes.md \
             "${ARCHIVE}" \
             "SHA256SUMS"

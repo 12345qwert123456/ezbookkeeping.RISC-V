@@ -1,0 +1,80 @@
+ARG EZB_VERSION=v1.4.0
+
+# ── Stage 1: frontend ──────────────────────────────────────────────────────────
+# Always built natively on amd64 – no QEMU required for Node.
+FROM --platform=linux/amd64 node:24-alpine AS fe-builder
+
+ARG EZB_VERSION
+
+RUN apk add --no-cache git
+
+RUN git clone --depth=1 --branch "${EZB_VERSION}" \
+        https://github.com/mayswind/ezbookkeeping.git /src
+
+WORKDIR /src
+
+RUN npm ci && npm run build
+
+
+# ── Stage 2: backend (cross-compile amd64 → riscv64) ──────────────────────────
+# gcc-riscv64-linux-gnu and libc6-dev-riscv64-cross are native amd64 packages;
+# no dpkg --add-architecture is needed.
+# go-sqlite3 bundles the SQLite amalgamation C source and compiles it via CGO,
+# so no separate riscv64 SQLite library is required.
+FROM --platform=linux/amd64 golang:1.26.2 AS be-builder
+
+ARG EZB_VERSION
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        gcc-riscv64-linux-gnu \
+        libc6-dev-riscv64-cross \
+        git && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN git clone --depth=1 --branch "${EZB_VERSION}" \
+        https://github.com/mayswind/ezbookkeeping.git /src
+
+WORKDIR /src
+
+# Download Go modules in a separate layer for better cache reuse.
+RUN go mod download
+
+# Cross-compile for linux/riscv64.
+# Dynamic linking is used to avoid the complexity of static glibc cross-linking;
+# the runtime image (ubuntu:24.04) provides the required glibc.
+RUN CC=riscv64-linux-gnu-gcc \
+    CGO_ENABLED=1 \
+    GOOS=linux \
+    GOARCH=riscv64 \
+    go build -a -trimpath -ldflags "-w -s" \
+        -o ezbookkeeping ezbookkeeping.go
+
+
+# ── Stage 3: runtime ───────────────────────────────────────────────────────────
+# Ubuntu 24.04 provides the glibc required by the dynamically-linked binary.
+FROM ubuntu:24.04
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends tzdata && \
+    rm -rf /var/lib/apt/lists/* && \
+    userdel -r ubuntu 2>/dev/null || true && \
+    groupdel ubuntu 2>/dev/null || true && \
+    groupadd -g 1000 ezbookkeeping && \
+    useradd -u 1000 -g 1000 -M -s /usr/sbin/nologin ezbookkeeping
+
+COPY --from=be-builder /src/ezbookkeeping  /ezbookkeeping/ezbookkeeping
+COPY --from=be-builder /src/conf           /ezbookkeeping/conf
+COPY --from=be-builder /src/templates      /ezbookkeeping/templates
+COPY --from=fe-builder /src/dist           /ezbookkeeping/public
+
+RUN mkdir -p /ezbookkeeping/data /ezbookkeeping/log /ezbookkeeping/storage && \
+    chown -R ezbookkeeping:ezbookkeeping /ezbookkeeping
+
+USER ezbookkeeping
+WORKDIR /ezbookkeeping
+
+EXPOSE 8080
+
+ENTRYPOINT ["/ezbookkeeping/ezbookkeeping"]
+CMD ["server", "run"]

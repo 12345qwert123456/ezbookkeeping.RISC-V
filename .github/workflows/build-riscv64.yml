@@ -1,0 +1,145 @@
+name: Build ezbookkeeping for RISC-V (riscv64)
+
+on:
+  schedule:
+    # Run daily at 06:00 UTC to pick up new upstream releases automatically.
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force rebuild even if the release already exists'
+        type: boolean
+        default: false
+      version:
+        description: 'ezbookkeeping version to build (e.g. v0.7.5); defaults to latest'
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  # ── detect ──────────────────────────────────────────────────────────────────
+  # Resolve the target version and decide whether a build is necessary.
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      should_build: ${{ steps.check.outputs.should_build }}
+
+    steps:
+      - name: Resolve version
+        id: resolve
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION=$(curl -fsSL \
+              https://api.github.com/repos/mayswind/ezbookkeeping/releases/latest \
+              | jq -r '.tag_name')
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: ${VERSION}"
+
+      - name: Check if release already exists
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          if [ "${{ inputs.force }}" = "true" ]; then
+            echo "Force flag set – will rebuild."
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if gh release view "${VERSION}-riscv64" \
+               --repo "${{ github.repository }}" &>/dev/null; then
+            echo "Release ${VERSION}-riscv64 already exists, skipping build."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Release ${VERSION}-riscv64 not found, will build."
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── build ───────────────────────────────────────────────────────────────────
+  # Cross-compile ezbookkeeping for linux/riscv64, publish Docker image and
+  # create a GitHub Release with the binary archive.
+  build:
+    needs: detect
+    if: needs.detect.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+
+    env:
+      VERSION: ${{ needs.detect.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.ezbookkeeping
+          platforms: linux/riscv64
+          build-args: EZB_VERSION=${{ env.VERSION }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          load: true
+          tags: ezbookkeeping-riscv64:${{ env.VERSION }}
+
+      - name: Extract binary and verify RISC-V ELF
+        run: |
+          CONTAINER=$(docker create "ezbookkeeping-riscv64:${VERSION}")
+          docker cp "${CONTAINER}:/ezbookkeeping/ezbookkeeping" ./ezbookkeeping
+          docker rm "${CONTAINER}"
+
+          file ./ezbookkeeping
+          file ./ezbookkeeping | grep -q "RISC-V" \
+            || { echo "ERROR: binary is not a RISC-V ELF!"; exit 1; }
+          echo "Verified: binary is a RISC-V ELF."
+
+      - name: Package release artifacts
+        run: |
+          VERSION_SHORT="${VERSION#v}"
+          ARCHIVE="ezbookkeeping-${VERSION_SHORT}-linux-riscv64.tar.gz"
+
+          tar -czf "${ARCHIVE}" ezbookkeeping
+          sha256sum "${ARCHIVE}" > SHA256SUMS
+
+          echo "ARCHIVE=${ARCHIVE}"         >> "$GITHUB_ENV"
+          echo "VERSION_SHORT=${VERSION_SHORT}" >> "$GITHUB_ENV"
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Push Docker image to Docker Hub
+        run: |
+          IMAGE="${{ vars.DOCKERHUB_USERNAME }}/ezbookkeeping-riscv64"
+          docker tag "ezbookkeeping-riscv64:${VERSION}" "${IMAGE}:${VERSION_SHORT}"
+          docker tag "ezbookkeeping-riscv64:${VERSION}" "${IMAGE}:latest"
+          docker push "${IMAGE}:${VERSION_SHORT}"
+          docker push "${IMAGE}:latest"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${VERSION}-riscv64" \
+            --repo "${{ github.repository }}" \
+            --title "ezbookkeeping ${VERSION} for linux/riscv64" \
+            --notes "Unofficial automated build of [ezbookkeeping ${VERSION}](https://github.com/mayswind/ezbookkeeping/releases/tag/${VERSION}) for the **linux/riscv64** architecture.
+
+No patches are applied to the upstream source.
+
+**Docker:**
+\`\`\`
+docker pull ${{ vars.DOCKERHUB_USERNAME }}/ezbookkeeping-riscv64:${VERSION_SHORT}
+\`\`\`" \
+            "${ARCHIVE}" \
+            "SHA256SUMS"

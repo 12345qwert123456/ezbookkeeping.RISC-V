@@ -25,6 +25,7 @@ jobs:
     outputs:
       version: ${{ steps.resolve.outputs.version }}
       should_build: ${{ steps.check.outputs.should_build }}
+      go_version: ${{ steps.gover.outputs.go_version }}
 
     steps:
       - name: Resolve version
@@ -60,6 +61,18 @@ jobs:
             echo "should_build=true" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Resolve Go version from upstream go.mod
+        id: gover
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          GO_VERSION=$(curl -fsSL \
+            "https://raw.githubusercontent.com/mayswind/ezbookkeeping/${VERSION}/go.mod" \
+            | awk '/^go [0-9]/ {print $2; exit}')
+          [ -n "${GO_VERSION}" ] || { echo "Could not read Go version from go.mod"; exit 1; }
+          echo "go_version=${GO_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Upstream requires Go ${GO_VERSION}"
+
   # ── build ───────────────────────────────────────────────────────────────────
   # Cross-compile ezbookkeeping for linux/riscv64, publish Docker image and
   # create a GitHub Release with the binary archive.
@@ -70,6 +83,7 @@ jobs:
 
     env:
       VERSION: ${{ needs.detect.outputs.version }}
+      GO_VERSION: ${{ needs.detect.outputs.go_version }}
 
     steps:
       - name: Checkout
@@ -84,7 +98,9 @@ jobs:
           context: .
           file: Dockerfile.ezbookkeeping
           platforms: linux/riscv64
-          build-args: EZB_VERSION=${{ env.VERSION }}
+          build-args: |
+            EZB_VERSION=${{ env.VERSION }}
+            GO_VERSION=${{ env.GO_VERSION }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           load: true

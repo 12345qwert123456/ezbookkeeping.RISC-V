@@ -1,4 +1,6 @@
-ARG EZB_VERSION=v1.4.0
+ARG EZB_VERSION=v2.1.1
+# Go toolchain version for the backend build; CI derives it from the upstream go.mod.
+ARG GO_VERSION=1.27.3
 
 # ── Stage 1: frontend ──────────────────────────────────────────────────────────
 # Always built natively on amd64 – no QEMU required for Node.
@@ -21,9 +23,12 @@ RUN npm ci && npm run build
 # no dpkg --add-architecture is needed.
 # go-sqlite3 bundles the SQLite amalgamation C source and compiles it via CGO,
 # so no separate riscv64 SQLite library is required.
-FROM --platform=linux/amd64 golang:1.26.2 AS be-builder
+FROM --platform=linux/amd64 golang:${GO_VERSION} AS be-builder
 
 ARG EZB_VERSION
+
+# Let Go fetch a newer toolchain if go.mod/toolchain demands more than the image has.
+ENV GOTOOLCHAIN=auto
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
